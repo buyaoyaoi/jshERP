@@ -1,0 +1,356 @@
+diff --git a/jshERP-boot/src/main/java/com/jsh/erp/datasource/entities/MaterialCurrentStock.java b/jshERP-boot/src/main/java/com/jsh/erp/datasource/entities/MaterialCurrentStock.java
+index 98b887d5..832ab841 100644
+--- a/jshERP-boot/src/main/java/com/jsh/erp/datasource/entities/MaterialCurrentStock.java
++++ b/jshERP-boot/src/main/java/com/jsh/erp/datasource/entities/MaterialCurrentStock.java
+@@ -1,75 +1,75 @@
+-package com.jsh.erp.datasource.entities;
+-
+-import java.math.BigDecimal;
+-
+-public class MaterialCurrentStock {
+-    private Long id;
+-
+-    private Long materialId;
+-
+-    private Long depotId;
+-
+-    private BigDecimal currentNumber;
+-
+-    private BigDecimal currentUnitPrice;
+-
+-    private Long tenantId;
+-
+-    private String deleteFlag;
+-
+-    public Long getId() {
+-        return id;
+-    }
+-
+-    public void setId(Long id) {
+-        this.id = id;
+-    }
+-
+-    public Long getMaterialId() {
+-        return materialId;
+-    }
+-
+-    public void setMaterialId(Long materialId) {
+-        this.materialId = materialId;
+-    }
+-
+-    public Long getDepotId() {
+-        return depotId;
+-    }
+-
+-    public void setDepotId(Long depotId) {
+-        this.depotId = depotId;
+-    }
+-
+-    public BigDecimal getCurrentNumber() {
+-        return currentNumber;
+-    }
+-
+-    public void setCurrentNumber(BigDecimal currentNumber) {
+-        this.currentNumber = currentNumber;
+-    }
+-
+-    public BigDecimal getCurrentUnitPrice() {
+-        return currentUnitPrice;
+-    }
+-
+-    public void setCurrentUnitPrice(BigDecimal currentUnitPrice) {
+-        this.currentUnitPrice = currentUnitPrice;
+-    }
+-
+-    public Long getTenantId() {
+-        return tenantId;
+-    }
+-
+-    public void setTenantId(Long tenantId) {
+-        this.tenantId = tenantId;
+-    }
+-
+-    public String getDeleteFlag() {
+-        return deleteFlag;
+-    }
+-
+-    public void setDeleteFlag(String deleteFlag) {
+-        this.deleteFlag = deleteFlag == null ? null : deleteFlag.trim();
+-    }
++package com.jsh.erp.datasource.entities;
++
++import java.math.BigDecimal;
++
++public class MaterialCurrentStock {
++    private Long id;
++
++    private Long materialId;
++
++    private Long depotId;
++
++    private BigDecimal currentNumber;
++
++    private BigDecimal currentUnitPrice;
++
++    private Long tenantId;
++
++    private String deleteFlag;
++
++    public Long getId() {
++        return id;
++    }
++
++    public void setId(Long id) {
++        this.id = id;
++    }
++
++    public Long getMaterialId() {
++        return materialId;
++    }
++
++    public void setMaterialId(Long materialId) {
++        this.materialId = materialId;
++    }
++
++    public Long getDepotId() {
++        return depotId;
++    }
++
++    public void setDepotId(Long depotId) {
++        this.depotId = depotId;
++    }
++
++    public BigDecimal getCurrentNumber() {
++        return currentNumber;
++    }
++
++    public void setCurrentNumber(BigDecimal currentNumber) {
++        this.currentNumber = currentNumber;
++    }
++
++    public BigDecimal getCurrentUnitPrice() {
++        return currentUnitPrice;
++    }
++
++    public void setCurrentUnitPrice(BigDecimal currentUnitPrice) {
++        this.currentUnitPrice = currentUnitPrice;
++    }
++
++    public Long getTenantId() {
++        return tenantId;
++    }
++
++    public void setTenantId(Long tenantId) {
++        this.tenantId = tenantId;
++    }
++
++    public String getDeleteFlag() {
++        return deleteFlag;
++    }
++
++    public void setDeleteFlag(String deleteFlag) {
++        this.deleteFlag = deleteFlag == null ? null : deleteFlag.trim();
++    }
+ }
+\ No newline at end of file
+diff --git a/jshERP-boot/src/main/java/com/jsh/erp/service/DepotHeadService.java b/jshERP-boot/src/main/java/com/jsh/erp/service/DepotHeadService.java
+index c5161065..fa53d090 100644
+--- a/jshERP-boot/src/main/java/com/jsh/erp/service/DepotHeadService.java
++++ b/jshERP-boot/src/main/java/com/jsh/erp/service/DepotHeadService.java
+@@ -415,6 +415,11 @@ public class DepotHeadService {
+ 
+     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+     public int batchDeleteBillByIds(String ids)throws Exception {
++        List<Long> idList = StringUtil.strToLongList(ids);
++        return depotItemService.executeWithStockLocksByHeaderIds(idList, () -> doBatchDeleteBillByIds(ids));
++    }
++
++    private int doBatchDeleteBillByIds(String ids)throws Exception {
+         StringBuffer sb = new StringBuffer();
+         sb.append(BusinessConstants.LOG_OPERATION_TYPE_DELETE);
+         List<DepotHead> dhList = getDepotHeadListByIds(ids);
+@@ -715,6 +720,11 @@ public class DepotHeadService {
+ 
+     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+     public int batchSetStatus(String status, String depotHeadIDs)throws Exception {
++        List<Long> ids = StringUtil.strToLongList(depotHeadIDs);
++        return depotItemService.executeWithStockLocksByHeaderIds(ids, () -> doBatchSetStatus(status, depotHeadIDs));
++    }
++
++    private int doBatchSetStatus(String status, String depotHeadIDs)throws Exception {
+         int result = 0;
+         boolean forceApprovalFlag = systemConfigService.getForceApprovalFlag();
+         boolean minusStockFlag = systemConfigService.getMinusStockFlag();
+diff --git a/jshERP-boot/src/main/java/com/jsh/erp/service/DepotItemService.java b/jshERP-boot/src/main/java/com/jsh/erp/service/DepotItemService.java
+index ff556f02..0c9e6dce 100644
+--- a/jshERP-boot/src/main/java/com/jsh/erp/service/DepotItemService.java
++++ b/jshERP-boot/src/main/java/com/jsh/erp/service/DepotItemService.java
+@@ -12,6 +12,7 @@ import com.jsh.erp.datasource.vo.DepotItemVoBatchNumberList;
+ import com.jsh.erp.datasource.vo.InOutPriceVo;
+ import com.jsh.erp.exception.BusinessRunTimeException;
+ import com.jsh.erp.exception.JshException;
++import com.jsh.erp.utils.RedisLockUtil;
+ import com.jsh.erp.utils.StringUtil;
+ import com.jsh.erp.utils.Tools;
+ import org.slf4j.Logger;
+@@ -23,6 +24,10 @@ import javax.annotation.Resource;
+ import javax.servlet.http.HttpServletRequest;
+ import java.math.BigDecimal;
+ import java.util.*;
++import java.util.concurrent.Callable;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentMap;
++import java.util.concurrent.locks.ReentrantLock;
+ 
+ @Service
+ public class DepotItemService {
+@@ -63,6 +68,14 @@ public class DepotItemService {
+     private MaterialCurrentStockMapperEx materialCurrentStockMapperEx;
+     @Resource
+     private LogService logService;
++    @Resource
++    private RedisLockUtil redisLockUtil;
++
++    private static final String STOCK_LOCK_PREFIX = "depot:stock:lock:";
++    private static final String HEADER_LOCK_PREFIX = "depot:header:lock:";
++    private static final long STOCK_LOCK_EXPIRE_TIME = 20000L;
++    private static final long STOCK_LOCK_WAIT_TIME = 3000L;
++    private static final ConcurrentMap<String, ReentrantLock> LOCAL_LOCK_MAP = new ConcurrentHashMap<>();
+ 
+     public DepotItem getDepotItem(long id)throws Exception {
+         DepotItem result=null;
+@@ -382,7 +395,13 @@ public class DepotItemService {
+ 
+     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+     public void saveDetials(String rows, Long headerId, String actionType, HttpServletRequest request) throws Exception{
+-        //查询单据主表信息
++        executeWithSaveDetailLocks(headerId, actionType, rows, () -> {
++            doSaveDetials(rows, headerId, actionType, request);
++            return null;
++        });
++    }
++
++    private void doSaveDetials(String rows, Long headerId, String actionType, HttpServletRequest request) throws Exception{
+         DepotHead depotHead =depotHeadMapper.selectByPrimaryKey(headerId);
+         //删除序列号和回收序列号
+         deleteOrCancelSerialNumber(actionType, depotHead, headerId);
+@@ -1213,6 +1232,119 @@ public class DepotItemService {
+         }
+     }
+ 
++    public <T> T executeWithSaveDetailLocks(Long headerId, String actionType, String rows, Callable<T> callable) throws Exception {
++        return executeWithLockKeys(buildSaveDetailLockKeys(headerId, actionType, rows), callable);
++    }
++
++    public <T> T executeWithStockLocksByHeaderIds(List<Long> headerIdList, Callable<T> callable) throws Exception {
++        return executeWithLockKeys(buildHeaderStockLockKeys(headerIdList), callable);
++    }
++
++    private <T> T executeWithLockKeys(Set<String> lockKeys, Callable<T> callable) throws Exception {
++        if(lockKeys == null || lockKeys.isEmpty()) {
++            return callable.call();
++        }
++        List<String> sortedLockKeys = new ArrayList<>(lockKeys);
++        Collections.sort(sortedLockKeys);
++        List<String> redisLockKeys = new ArrayList<>();
++        List<String> localLockKeys = new ArrayList<>();
++        String requestId = UUID.randomUUID().toString();
++        try {
++            for (String lockKey : sortedLockKeys) {
++                ReentrantLock localLock = LOCAL_LOCK_MAP.computeIfAbsent(lockKey, key -> new ReentrantLock());
++                localLock.lock();
++                localLockKeys.add(lockKey);
++                boolean locked;
++                try {
++                    locked = redisLockUtil.tryLock(lockKey, requestId, STOCK_LOCK_EXPIRE_TIME, STOCK_LOCK_WAIT_TIME);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                    throw new BusinessRunTimeException(ExceptionConstants.DEPOT_HEAD_SUBMIT_REPEAT_FAILED_CODE,
++                            "库存处理中，请稍后重试");
++                }
++                if (!locked) {
++                    throw new BusinessRunTimeException(ExceptionConstants.DEPOT_HEAD_SUBMIT_REPEAT_FAILED_CODE,
++                            "库存处理中，请稍后重试");
++                }
++                redisLockKeys.add(lockKey);
++            }
++            return callable.call();
++        } finally {
++            for (int i = redisLockKeys.size() - 1; i >= 0; i--) {
++                redisLockUtil.unlock(redisLockKeys.get(i), requestId);
++            }
++            for (int i = localLockKeys.size() - 1; i >= 0; i--) {
++                String lockKey = localLockKeys.get(i);
++                ReentrantLock localLock = LOCAL_LOCK_MAP.get(lockKey);
++                if(localLock != null) {
++                    localLock.unlock();
++                    if(!localLock.hasQueuedThreads() && !localLock.isLocked()) {
++                        LOCAL_LOCK_MAP.remove(lockKey, localLock);
++                    }
++                }
++            }
++        }
++    }
++
++    private Set<String> buildSaveDetailLockKeys(Long headerId, String actionType, String rows) throws Exception {
++        Set<String> lockKeys = new HashSet<>();
++        addHeaderLockKey(lockKeys, headerId);
++        if("update".equals(actionType)) {
++            addDepotItemLockKeys(lockKeys, getListByHeaderId(headerId));
++        }
++        JSONArray rowArr = JSONArray.parseArray(rows);
++        if(rowArr != null) {
++            for (int i = 0; i < rowArr.size(); i++) {
++                JSONObject rowObj = JSONObject.parseObject(rowArr.getString(i));
++                MaterialExtend materialExtend = materialExtendService.getInfoByBarCode(rowObj.getString("barCode"));
++                if(materialExtend == null) {
++                    throw new BusinessRunTimeException(ExceptionConstants.MATERIAL_BARCODE_IS_NOT_EXIST_CODE,
++                            String.format(ExceptionConstants.MATERIAL_BARCODE_IS_NOT_EXIST_MSG, rowObj.getString("barCode")));
++                }
++                Long materialId = materialExtend.getMaterialId();
++                if (StringUtil.isExist(rowObj.get("depotId"))) {
++                    addStockLockKey(lockKeys, materialId, rowObj.getLong("depotId"));
++                }
++                if (StringUtil.isExist(rowObj.get("anotherDepotId"))) {
++                    addStockLockKey(lockKeys, materialId, rowObj.getLong("anotherDepotId"));
++                }
++            }
++        }
++        return lockKeys;
++    }
++
++    private Set<String> buildHeaderStockLockKeys(List<Long> headerIdList) throws Exception {
++        Set<String> lockKeys = new HashSet<>();
++        if(headerIdList != null) {
++            for (Long headerId : headerIdList) {
++                addHeaderLockKey(lockKeys, headerId);
++                addDepotItemLockKeys(lockKeys, getListByHeaderId(headerId));
++            }
++        }
++        return lockKeys;
++    }
++
++    private void addDepotItemLockKeys(Set<String> lockKeys, List<DepotItem> depotItemList) {
++        if(depotItemList != null) {
++            for (DepotItem depotItem : depotItemList) {
++                addStockLockKey(lockKeys, depotItem.getMaterialId(), depotItem.getDepotId());
++                addStockLockKey(lockKeys, depotItem.getMaterialId(), depotItem.getAnotherDepotId());
++            }
++        }
++    }
++
++    private void addHeaderLockKey(Set<String> lockKeys, Long headerId) {
++        if(headerId != null) {
++            lockKeys.add(HEADER_LOCK_PREFIX + headerId);
++        }
++    }
++
++    private void addStockLockKey(Set<String> lockKeys, Long materialId, Long depotId) {
++        if(materialId != null && depotId != null) {
++            lockKeys.add(STOCK_LOCK_PREFIX + materialId + ":" + depotId);
++        }
++    }
++
+     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+     public BigDecimal getFinishPurchaseNumber(Long meId, Long id, Long headerId, Unit unitInfo, String materialUnit, String linkType) {
+         BigDecimal count = BigDecimal.ZERO;

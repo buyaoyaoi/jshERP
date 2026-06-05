@@ -415,6 +415,11 @@ public class DepotHeadService {
 
     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
     public int batchDeleteBillByIds(String ids)throws Exception {
+        List<Long> idList = StringUtil.strToLongList(ids);
+        return depotItemService.executeWithStockLocksByHeaderIds(idList, () -> doBatchDeleteBillByIds(ids));
+    }
+
+    private int doBatchDeleteBillByIds(String ids)throws Exception {
         StringBuffer sb = new StringBuffer();
         sb.append(BusinessConstants.LOG_OPERATION_TYPE_DELETE);
         List<DepotHead> dhList = getDepotHeadListByIds(ids);
@@ -715,6 +720,11 @@ public class DepotHeadService {
 
     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
     public int batchSetStatus(String status, String depotHeadIDs)throws Exception {
+        List<Long> ids = StringUtil.strToLongList(depotHeadIDs);
+        return depotItemService.executeWithStockLocksByHeaderIds(ids, () -> doBatchSetStatus(status, depotHeadIDs));
+    }
+
+    private int doBatchSetStatus(String status, String depotHeadIDs)throws Exception {
         int result = 0;
         boolean forceApprovalFlag = systemConfigService.getForceApprovalFlag();
         boolean minusStockFlag = systemConfigService.getMinusStockFlag();
