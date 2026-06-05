@@ -692,7 +692,7 @@ public class DepotHeadController extends BaseController {
                            HttpServletRequest request)throws Exception {
         Map<String, Object> objectMap = new HashMap<>();
         String organIdStr = StringUtil.getInfo(search, "organId");
-        Long organId = Long.parseLong(organIdStr);
+        Long organId = StringUtil.isNotEmpty(organIdStr) ? Long.parseLong(organIdStr) : null;
         String materialParam = StringUtil.getInfo(search, "materialParam");
         String number = StringUtil.getInfo(search, "number");
         String beginTime = StringUtil.getInfo(search, "beginTime");
