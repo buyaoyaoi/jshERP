@@ -1127,8 +1127,6 @@ public class DepotItemService {
      */
     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
     public void updateCurrentStockWithLock(DepotItem depotItem, String depotType) throws Exception {
-        BigDecimal currentUnitPrice = materialCurrentStockMapperEx.getCurrentUnitPriceByMId(depotItem.getMaterialId());
-        
         BigDecimal basicNumber = depotItem.getBasicNumber() != null ? depotItem.getBasicNumber() : BigDecimal.ZERO;
         
         if (BusinessConstants.DEPOTHEAD_TYPE_OUT.equals(depotType)) {
@@ -1142,12 +1140,6 @@ public class DepotItemService {
         } else {
             // 入库：增加库存
             safeIncreaseStock(depotItem.getMaterialId(), depotItem.getDepotId(), basicNumber);
-        }
-        
-        // 更新当前单价（原有逻辑）
-        updateCurrentStockFun(depotItem.getMaterialId(), depotItem.getDepotId(), currentUnitPrice);
-        if (depotItem.getAnotherDepotId() != null) {
-            updateCurrentStockFun(depotItem.getMaterialId(), depotItem.getAnotherDepotId(), currentUnitPrice);
         }
     }
 
@@ -1234,21 +1226,38 @@ public class DepotItemService {
      */
     public void updateCurrentStockFun(Long mId, Long dId, BigDecimal currentUnitPrice) throws Exception {
         if(mId!=null && dId!=null) {
-            MaterialCurrentStockExample example = new MaterialCurrentStockExample();
-            example.createCriteria().andMaterialIdEqualTo(mId).andDepotIdEqualTo(dId)
-                    .andDeleteFlagNotEqualTo(BusinessConstants.DELETE_FLAG_DELETED);
-            List<MaterialCurrentStock> list = materialCurrentStockMapper.selectByExample(example);
-            MaterialCurrentStock materialCurrentStock = new MaterialCurrentStock();
-            materialCurrentStock.setMaterialId(mId);
-            materialCurrentStock.setDepotId(dId);
-            materialCurrentStock.setCurrentNumber(getStockByParam(dId,mId,null,null));
-            materialCurrentStock.setCurrentUnitPrice(currentUnitPrice);
-            if(list!=null && list.size()>0) {
-                Long mcsId = list.get(0).getId();
-                materialCurrentStock.setId(mcsId);
-                materialCurrentStockMapper.updateByPrimaryKeySelective(materialCurrentStock);
-            } else {
-                materialCurrentStockMapper.insertSelective(materialCurrentStock);
+            String lockKey = STOCK_LOCK_PREFIX + mId + ":" + dId;
+            String lockValue = UUID.randomUUID().toString();
+            try {
+                boolean lockAcquired = tryAcquireLock(lockKey, lockValue);
+                if (!lockAcquired) {
+                    for (int i = 0; i < MAX_RETRY_COUNT; i++) {
+                        Thread.sleep((long) Math.pow(2, i) * 100);
+                        lockAcquired = tryAcquireLock(lockKey, lockValue);
+                        if (lockAcquired) break;
+                    }
+                    if (!lockAcquired) {
+                        throw new BusinessRunTimeException(ExceptionConstants.DATA_WRITE_FAIL_CODE, "系统繁忙，请稍后重试");
+                    }
+                }
+                
+                MaterialCurrentStock stock = materialCurrentStockMapperEx.getStockWithLock(mId, dId);
+                BigDecimal newNumber = getStockByParam(dId, mId, null, null);
+                
+                if(stock != null) {
+                    stock.setCurrentNumber(newNumber);
+                    stock.setCurrentUnitPrice(currentUnitPrice);
+                    materialCurrentStockMapper.updateByPrimaryKeySelective(stock);
+                } else {
+                    MaterialCurrentStock materialCurrentStock = new MaterialCurrentStock();
+                    materialCurrentStock.setMaterialId(mId);
+                    materialCurrentStock.setDepotId(dId);
+                    materialCurrentStock.setCurrentNumber(newNumber);
+                    materialCurrentStock.setCurrentUnitPrice(currentUnitPrice);
+                    materialCurrentStockMapper.insertSelective(materialCurrentStock);
+                }
+            } finally {
+                releaseLock(lockKey, lockValue);
             }
         }
     }
