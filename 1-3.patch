@@ -1,0 +1,13 @@
+diff --git a/jshERP-boot/src/main/java/com/jsh/erp/controller/DepotHeadController.java b/jshERP-boot/src/main/java/com/jsh/erp/controller/DepotHeadController.java
+index b29ac75e..45d56d82 100644
+--- a/jshERP-boot/src/main/java/com/jsh/erp/controller/DepotHeadController.java
++++ b/jshERP-boot/src/main/java/com/jsh/erp/controller/DepotHeadController.java
+@@ -692,7 +692,7 @@ public class DepotHeadController extends BaseController {
+                            HttpServletRequest request)throws Exception {
+         Map<String, Object> objectMap = new HashMap<>();
+         String organIdStr = StringUtil.getInfo(search, "organId");
+-        Long organId = Long.parseLong(organIdStr);
++        Long organId = organIdStr != null ? Long.parseLong(organIdStr) : null;
+         String materialParam = StringUtil.getInfo(search, "materialParam");
+         String number = StringUtil.getInfo(search, "number");
+         String beginTime = StringUtil.getInfo(search, "beginTime");
