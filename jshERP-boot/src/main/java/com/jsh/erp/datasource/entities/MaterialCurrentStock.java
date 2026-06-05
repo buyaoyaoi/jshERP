@@ -17,6 +17,8 @@ public class MaterialCurrentStock {
 
     private String deleteFlag;
 
+    private Integer version;
+
     public Long getId() {
         return id;
     }
@@ -71,5 +73,13 @@ public class MaterialCurrentStock {
 
     public void setDeleteFlag(String deleteFlag) {
         this.deleteFlag = deleteFlag == null ? null : deleteFlag.trim();
+    }
+
+    public Integer getVersion() {
+        return version;
+    }
+
+    public void setVersion(Integer version) {
+        this.version = version;
     }
 }

@@ -46,4 +46,54 @@
         )
     </update>
 
+    <!-- 原子扣减库存 - 带库存校验，防止负数 -->
+    <update id="decreaseStock">
+        update jsh_material_current_stock 
+        set current_number = current_number - #{decreaseNumber},
+            version = version + 1
+        where material_id = #{materialId}
+          and depot_id = #{depotId}
+          and ifnull(delete_flag,'0') != '1'
+          and current_number >= #{decreaseNumber}
+          and version = #{version}
+    </update>
+
+    <!-- 原子增加库存 -->
+    <update id="increaseStock">
+        update jsh_material_current_stock 
+        set current_number = current_number + #{increaseNumber},
+            version = version + 1
+        where material_id = #{materialId}
+          and depot_id = #{depotId}
+          and ifnull(delete_flag,'0') != '1'
+          and version = #{version}
+    </update>
+
+    <!-- 查询当前库存（带悲观锁 for update） -->
+    <select id="getStockWithLock" resultType="com.jsh.erp.datasource.entities.MaterialCurrentStock">
+        select * from jsh_material_current_stock
+        where material_id = #{materialId}
+          and depot_id = #{depotId}
+          and ifnull(delete_flag,'0') != '1'
+        for update
+    </select>
+
+    <!-- 查询当前库存（不带锁） -->
+    <select id="getCurrentStock" resultType="com.jsh.erp.datasource.entities.MaterialCurrentStock">
+        select * from jsh_material_current_stock
+        where material_id = #{materialId}
+          and depot_id = #{depotId}
+          and ifnull(delete_flag,'0') != '1'
+    </select>
+
+    <!-- 乐观锁更新库存数量 -->
+    <update id="updateCurrentNumberWithVersion">
+        update jsh_material_current_stock 
+        set current_number = #{currentNumber},
+            version = version + 1
+        where id = #{id}
+          and version = #{version}
+          and ifnull(delete_flag,'0') != '1'
+    </update>
+
 </mapper>

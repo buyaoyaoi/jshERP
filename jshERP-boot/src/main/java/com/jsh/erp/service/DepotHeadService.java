@@ -33,6 +33,7 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.UUID;
 
 import static com.jsh.erp.utils.Tools.getCenternTime;
 import static com.jsh.erp.utils.Tools.getNow3;
@@ -55,6 +56,15 @@ public class DepotHeadService {
     DepotItemService depotItemService;
     @Resource
     private SupplierService supplierService;
+    @Resource
+    private RedisService redisService;
+    @Resource
+    private org.springframework.data.redis.core.RedisTemplate redisTemplate;
+
+    // 库存锁前缀
+    private static final String STOCK_LOCK_PREFIX = "stock:lock:";
+    // 锁超时时间（秒）
+    private static final long LOCK_EXPIRE_TIME = 30;
     @Resource
     private UserBusinessService userBusinessService;
     @Resource
@@ -1251,31 +1261,29 @@ public class DepotHeadService {
                         String.format(ExceptionConstants.DEPOT_HEAD_FILE_NUM_LIMIT_MSG, 4));
             }
         }
-        depotHeadMapper.insertSelective(depotHead);
-        /**入库和出库处理预付款信息*/
-        if(BusinessConstants.PAY_TYPE_PREPAID.equals(depotHead.getPayType())){
-            if(depotHead.getOrganId()!=null) {
-                BigDecimal currentAdvanceIn = supplierService.getSupplier(depotHead.getOrganId()).getAdvanceIn();
-                if(currentAdvanceIn.compareTo(depotHead.getTotalPrice())>=0) {
-                    //更新会员的预付款
-                    supplierService.updateAdvanceIn(depotHead.getOrganId());
-                } else {
-                    throw new BusinessRunTimeException(ExceptionConstants.DEPOT_HEAD_MEMBER_PAY_LACK_CODE,
-                            String.format(ExceptionConstants.DEPOT_HEAD_MEMBER_PAY_LACK_MSG));
-                }
+        
+        // 出库单需要获取分布式锁
+        if (BusinessConstants.DEPOTHEAD_TYPE_OUT.equals(depotHead.getType())) {
+            // 解析明细行获取所有商品+仓库组合
+            List<String> lockKeys = parseLockKeysFromRows(rows);
+            Map<String, String> acquiredLocks = new HashMap<>();
+            
+            try {
+                // 获取所有需要的锁
+                acquireStockLocks(lockKeys, acquiredLocks);
+                
+                // 在锁保护下执行单据保存和库存扣减
+                executeDepotHeadSave(depotHead, rows, request);
+                
+            } finally {
+                // 释放所有获取的锁
+                releaseStockLocks(acquiredLocks);
             }
+        } else {
+            // 入库单直接保存
+            executeDepotHeadSave(depotHead, rows, request);
         }
-        //根据单据编号查询单据id
-        DepotHeadExample dhExample = new DepotHeadExample();
-        dhExample.createCriteria().andNumberEqualTo(depotHead.getNumber()).andDeleteFlagNotEqualTo(BusinessConstants.DELETE_FLAG_DELETED);
-        List<DepotHead> list = depotHeadMapper.selectByExample(dhExample);
-        if(list!=null) {
-            Long headId = list.get(0).getId();
-            /**入库和出库处理单据子表信息*/
-            depotItemService.saveDetials(rows,headId, "add",request);
-            /**更新最终欠款*/
-            updateLastDebtByBillId(depotHead.getDebt(), headId);
-        }
+        
         String statusStr = depotHead.getStatus().equals("1")?"[审核]":"";
         logService.insertLog("单据",
                 new StringBuffer(BusinessConstants.LOG_OPERATION_TYPE_ADD).append(depotHead.getNumber()).append(statusStr).toString(),
@@ -1387,6 +1395,127 @@ public class DepotHeadService {
         logService.insertLog("单据",
                 new StringBuffer(BusinessConstants.LOG_OPERATION_TYPE_EDIT).append(depotHead.getNumber()).append(statusStr).toString(),
                 ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getRequest());
+    }
+
+    /**
+     * 解析明细行获取所有商品+仓库组合的锁键
+     */
+    private List<String> parseLockKeysFromRows(String rows) {
+        List<String> lockKeys = new ArrayList<>();
+        if (StringUtil.isEmpty(rows)) {
+            return lockKeys;
+        }
+        try {
+            JSONArray jsonArray = JSONArray.parseArray(rows);
+            for (int i = 0; i < jsonArray.size(); i++) {
+                JSONObject row = jsonArray.getJSONObject(i);
+                Long materialId = row.getLong("materialId");
+                Long depotId = row.getLong("depotId");
+                if (materialId != null && depotId != null) {
+                    String lockKey = STOCK_LOCK_PREFIX + materialId + ":" + depotId;
+                    if (!lockKeys.contains(lockKey)) {
+                        lockKeys.add(lockKey);
+                    }
+                }
+                // 处理调拨单的目标仓库
+                Long anotherDepotId = row.getLong("anotherDepotId");
+                if (materialId != null && anotherDepotId != null) {
+                    String lockKey = STOCK_LOCK_PREFIX + materialId + ":" + anotherDepotId;
+                    if (!lockKeys.contains(lockKey)) {
+                        lockKeys.add(lockKey);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("解析明细行失败, rows={}", rows, e);
+        }
+        // 按锁键排序，确保获取顺序一致，防止死锁
+        Collections.sort(lockKeys);
+        return lockKeys;
+    }
+
+    /**
+     * 获取库存分布式锁
+     */
+    private void acquireStockLocks(List<String> lockKeys, Map<String, String> acquiredLocks) throws Exception {
+        String lockValue = UUID.randomUUID().toString();
+        
+        for (String lockKey : lockKeys) {
+            int retryCount = 0;
+            boolean acquired = false;
+            
+            while (!acquired && retryCount < 3) {
+                try {
+                    Boolean result = (Boolean) redisTemplate.opsForValue().setIfAbsent(lockKey, lockValue, LOCK_EXPIRE_TIME, java.util.concurrent.TimeUnit.SECONDS);
+                    if (result != null && result) {
+                        acquiredLocks.put(lockKey, lockValue);
+                        acquired = true;
+                    } else {
+                        retryCount++;
+                        Thread.sleep((long) Math.pow(2, retryCount) * 100);
+                    }
+                } catch (Exception e) {
+                    logger.error("获取库存锁失败, lockKey={}", lockKey, e);
+                    throw e;
+                }
+            }
+            
+            if (!acquired) {
+                // 获取锁失败，释放已获取的锁
+                releaseStockLocks(acquiredLocks);
+                throw new BusinessRunTimeException(ExceptionConstants.MATERIAL_STOCK_NOT_ENOUGH_CODE,
+                        "系统繁忙，请稍后重试");
+            }
+        }
+    }
+
+    /**
+     * 释放库存分布式锁
+     */
+    private void releaseStockLocks(Map<String, String> acquiredLocks) {
+        for (Map.Entry<String, String> entry : acquiredLocks.entrySet()) {
+            try {
+                String currentValue = (String) redisTemplate.opsForValue().get(entry.getKey());
+                if (entry.getValue().equals(currentValue)) {
+                    redisTemplate.delete(entry.getKey());
+                }
+            } catch (Exception e) {
+                logger.error("释放库存锁失败, lockKey={}", entry.getKey(), e);
+            }
+        }
+        acquiredLocks.clear();
+    }
+
+    /**
+     * 执行单据保存和库存扣减（抽取为独立方法，便于锁保护）
+     */
+    private void executeDepotHeadSave(DepotHead depotHead, String rows, HttpServletRequest request) throws Exception {
+        depotHeadMapper.insertSelective(depotHead);
+        
+        /**入库和出库处理预付款信息*/
+        if(BusinessConstants.PAY_TYPE_PREPAID.equals(depotHead.getPayType())){
+            if(depotHead.getOrganId()!=null) {
+                BigDecimal currentAdvanceIn = supplierService.getSupplier(depotHead.getOrganId()).getAdvanceIn();
+                if(currentAdvanceIn.compareTo(depotHead.getTotalPrice())>=0) {
+                    supplierService.updateAdvanceIn(depotHead.getOrganId());
+                } else {
+                    throw new BusinessRunTimeException(ExceptionConstants.DEPOT_HEAD_MEMBER_PAY_LACK_CODE,
+                            String.format(ExceptionConstants.DEPOT_HEAD_MEMBER_PAY_LACK_MSG));
+                }
+            }
+        }
+        
+        //根据单据编号查询单据id
+        DepotHeadExample dhExample = new DepotHeadExample();
+        dhExample.createCriteria().andNumberEqualTo(depotHead.getNumber()).andDeleteFlagNotEqualTo(BusinessConstants.DELETE_FLAG_DELETED);
+        List<DepotHead> list = depotHeadMapper.selectByExample(dhExample);
+        if(list!=null && !list.isEmpty()) {
+            Long headId = list.get(0).getId();
+            /**入库和出库处理单据子表信息*/
+            depotItemService.saveDetials(rows, headId, "add", request);
+            /**更新最终欠款*/
+            updateLastDebtByBillId(depotHead.getDebt(), headId);
+        }
     }
 
     /**

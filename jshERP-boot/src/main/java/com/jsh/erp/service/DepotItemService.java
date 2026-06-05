@@ -63,6 +63,15 @@ public class DepotItemService {
     private MaterialCurrentStockMapperEx materialCurrentStockMapperEx;
     @Resource
     private LogService logService;
+    @Resource
+    private RedisService redisService;
+
+    // 库存锁前缀
+    private static final String STOCK_LOCK_PREFIX = "stock:lock:";
+    // 锁超时时间（秒）
+    private static final long LOCK_EXPIRE_TIME = 30;
+    // 最大重试次数
+    private static final int MAX_RETRY_COUNT = 3;
 
     public DepotItem getDepotItem(long id)throws Exception {
         DepotItem result=null;
@@ -687,8 +696,8 @@ public class DepotItemService {
             //批量写入单据明细数据
             depotItemMapperEx.batchInsert(depotItemList);
             for (DepotItem depotItem : depotItemList) {
-                //更新当前库存
-                updateCurrentStock(depotItem);
+                //更新当前库存（使用并发安全的方法）
+                updateCurrentStockWithLock(depotItem, depotHead.getType());
                 //更新当前成本价
                 updateCurrentUnitPrice(depotItem);
                 //更新商品的价格
@@ -1099,7 +1108,7 @@ public class DepotItemService {
     }
 
     /**
-     * 根据单据明细来批量更新当前库存
+     * 根据单据明细来批量更新当前库存（原方法保留，兼容其他调用）
      * @param depotItem
      */
     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
@@ -1107,6 +1116,37 @@ public class DepotItemService {
         BigDecimal currentUnitPrice = materialCurrentStockMapperEx.getCurrentUnitPriceByMId(depotItem.getMaterialId());
         updateCurrentStockFun(depotItem.getMaterialId(), depotItem.getDepotId(), currentUnitPrice);
         if(depotItem.getAnotherDepotId()!=null){
+            updateCurrentStockFun(depotItem.getMaterialId(), depotItem.getAnotherDepotId(), currentUnitPrice);
+        }
+    }
+
+    /**
+     * 并发安全的库存更新方法（根据单据类型决定是入库还是出库）
+     * @param depotItem 单据明细
+     * @param depotType 单据类型（入库/出库）
+     */
+    @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+    public void updateCurrentStockWithLock(DepotItem depotItem, String depotType) throws Exception {
+        BigDecimal currentUnitPrice = materialCurrentStockMapperEx.getCurrentUnitPriceByMId(depotItem.getMaterialId());
+        
+        BigDecimal basicNumber = depotItem.getBasicNumber() != null ? depotItem.getBasicNumber() : BigDecimal.ZERO;
+        
+        if (BusinessConstants.DEPOTHEAD_TYPE_OUT.equals(depotType)) {
+            // 出库：扣减库存
+            safeDecreaseStock(depotItem.getMaterialId(), depotItem.getDepotId(), basicNumber);
+            
+            // 如果是调拨单，目标仓库增加库存
+            if (depotItem.getAnotherDepotId() != null) {
+                safeIncreaseStock(depotItem.getMaterialId(), depotItem.getAnotherDepotId(), basicNumber);
+            }
+        } else {
+            // 入库：增加库存
+            safeIncreaseStock(depotItem.getMaterialId(), depotItem.getDepotId(), basicNumber);
+        }
+        
+        // 更新当前单价（原有逻辑）
+        updateCurrentStockFun(depotItem.getMaterialId(), depotItem.getDepotId(), currentUnitPrice);
+        if (depotItem.getAnotherDepotId() != null) {
             updateCurrentStockFun(depotItem.getMaterialId(), depotItem.getAnotherDepotId(), currentUnitPrice);
         }
     }
@@ -1188,7 +1228,7 @@ public class DepotItemService {
     }
 
     /**
-     * 根据商品和仓库来更新当前库存
+     * 根据商品和仓库来更新当前库存（原方法保留，兼容其他调用）
      * @param mId
      * @param dId
      */
@@ -1211,6 +1251,244 @@ public class DepotItemService {
                 materialCurrentStockMapper.insertSelective(materialCurrentStock);
             }
         }
+    }
+
+    /**
+     * 并发安全的库存扣减方法（使用 Redis 分布式锁 + 乐观锁）
+     * @param mId 商品ID
+     * @param dId 仓库ID
+     * @param decreaseNumber 扣减数量
+     * @return true-扣减成功, false-扣减失败（库存不足或并发冲突）
+     */
+    @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+    public boolean safeDecreaseStock(Long mId, Long dId, BigDecimal decreaseNumber) throws Exception {
+        // 生成锁key：商品ID + 仓库ID
+        String lockKey = STOCK_LOCK_PREFIX + mId + ":" + dId;
+        String lockValue = UUID.randomUUID().toString();
+        
+        try {
+            // 尝试获取分布式锁
+            boolean lockAcquired = tryAcquireLock(lockKey, lockValue);
+            if (!lockAcquired) {
+                // 获取锁失败，重试机制
+                return retryDecreaseStock(mId, dId, decreaseNumber, 1);
+            }
+            
+            try {
+                // 锁获取成功，执行扣减逻辑
+                return doDecreaseStock(mId, dId, decreaseNumber);
+            } finally {
+                // 释放锁
+                releaseLock(lockKey, lockValue);
+            }
+        } catch (Exception e) {
+            logger.error("库存扣减异常, mId={}, dId={}, decreaseNumber={}", mId, dId, decreaseNumber, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 重试扣减库存
+     */
+    private boolean retryDecreaseStock(Long mId, Long dId, BigDecimal decreaseNumber, int retryCount) throws Exception {
+        if (retryCount >= MAX_RETRY_COUNT) {
+            logger.warn("库存扣减重试次数耗尽, mId={}, dId={}, decreaseNumber={}", mId, dId, decreaseNumber);
+            throw new BusinessRunTimeException(ExceptionConstants.MATERIAL_STOCK_NOT_ENOUGH_CODE,
+                    "库存扣减失败，系统繁忙，请稍后重试");
+        }
+        
+        // 等待一段时间后重试（指数退避）
+        Thread.sleep((long) Math.pow(2, retryCount) * 100);
+        
+        String lockKey = STOCK_LOCK_PREFIX + mId + ":" + dId;
+        String lockValue = UUID.randomUUID().toString();
+        
+        try {
+            boolean lockAcquired = tryAcquireLock(lockKey, lockValue);
+            if (!lockAcquired) {
+                return retryDecreaseStock(mId, dId, decreaseNumber, retryCount + 1);
+            }
+            
+            try {
+                return doDecreaseStock(mId, dId, decreaseNumber);
+            } finally {
+                releaseLock(lockKey, lockValue);
+            }
+        } catch (Exception e) {
+            logger.error("库存扣减重试异常, mId={}, dId={}, decreaseNumber={}, retryCount={}", 
+                    mId, dId, decreaseNumber, retryCount, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 执行实际的库存扣减（带乐观锁）
+     */
+    private boolean doDecreaseStock(Long mId, Long dId, BigDecimal decreaseNumber) throws Exception {
+        if (decreaseNumber == null || decreaseNumber.compareTo(BigDecimal.ZERO) <= 0) {
+            return true; // 无需扣减
+        }
+        
+        // 查询当前库存记录（带悲观锁）
+        MaterialCurrentStock stock = materialCurrentStockMapperEx.getStockWithLock(mId, dId);
+        
+        if (stock == null) {
+            throw new BusinessRunTimeException(ExceptionConstants.MATERIAL_STOCK_NOT_ENOUGH_CODE,
+                    "库存记录不存在");
+        }
+        
+        BigDecimal currentNumber = stock.getCurrentNumber();
+        if (currentNumber == null) {
+            currentNumber = BigDecimal.ZERO;
+        }
+        
+        // 库存校验
+        if (currentNumber.compareTo(decreaseNumber) < 0) {
+            throw new BusinessRunTimeException(ExceptionConstants.MATERIAL_STOCK_NOT_ENOUGH_CODE,
+                    "库存不足，当前库存: " + currentNumber + "，需要扣减: " + decreaseNumber);
+        }
+        
+        // 使用原子操作扣减库存（带乐观锁）
+        int updated = materialCurrentStockMapperEx.decreaseStock(
+                mId, dId, decreaseNumber, stock.getVersion());
+        
+        if (updated == 0) {
+            // 乐观锁冲突，说明库存已被其他线程修改
+            throw new BusinessRunTimeException(ExceptionConstants.MATERIAL_STOCK_NOT_ENOUGH_CODE,
+                    "库存已被其他操作修改，请重试");
+        }
+        
+        return true;
+    }
+
+    /**
+     * 并发安全的库存增加方法
+     * @param mId 商品ID
+     * @param dId 仓库ID
+     * @param increaseNumber 增加数量
+     * @return true-增加成功
+     */
+    @Transactional(value = "transactionManager", rollbackFor = Exception.class)
+    public boolean safeIncreaseStock(Long mId, Long dId, BigDecimal increaseNumber) throws Exception {
+        if (increaseNumber == null || increaseNumber.compareTo(BigDecimal.ZERO) <= 0) {
+            return true; // 无需增加
+        }
+        
+        String lockKey = STOCK_LOCK_PREFIX + mId + ":" + dId;
+        String lockValue = UUID.randomUUID().toString();
+        
+        try {
+            boolean lockAcquired = tryAcquireLock(lockKey, lockValue);
+            if (!lockAcquired) {
+                return retryIncreaseStock(mId, dId, increaseNumber, 1);
+            }
+            
+            try {
+                return doIncreaseStock(mId, dId, increaseNumber);
+            } finally {
+                releaseLock(lockKey, lockValue);
+            }
+        } catch (Exception e) {
+            logger.error("库存增加异常, mId={}, dId={}, increaseNumber={}", mId, dId, increaseNumber, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 重试增加库存
+     */
+    private boolean retryIncreaseStock(Long mId, Long dId, BigDecimal increaseNumber, int retryCount) throws Exception {
+        if (retryCount >= MAX_RETRY_COUNT) {
+            logger.warn("库存增加重试次数耗尽, mId={}, dId={}, increaseNumber={}", mId, dId, increaseNumber);
+            throw new BusinessRunTimeException(ExceptionConstants.DATA_WRITE_FAIL_CODE,
+                    "库存增加失败，系统繁忙，请稍后重试");
+        }
+        
+        Thread.sleep((long) Math.pow(2, retryCount) * 100);
+        
+        String lockKey = STOCK_LOCK_PREFIX + mId + ":" + dId;
+        String lockValue = UUID.randomUUID().toString();
+        
+        try {
+            boolean lockAcquired = tryAcquireLock(lockKey, lockValue);
+            if (!lockAcquired) {
+                return retryIncreaseStock(mId, dId, increaseNumber, retryCount + 1);
+            }
+            
+            try {
+                return doIncreaseStock(mId, dId, increaseNumber);
+            } finally {
+                releaseLock(lockKey, lockValue);
+            }
+        } catch (Exception e) {
+            logger.error("库存增加重试异常, mId={}, dId={}, increaseNumber={}, retryCount={}", 
+                    mId, dId, increaseNumber, retryCount, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 执行实际的库存增加（带乐观锁）
+     */
+    private boolean doIncreaseStock(Long mId, Long dId, BigDecimal increaseNumber) throws Exception {
+        MaterialCurrentStock stock = materialCurrentStockMapperEx.getStockWithLock(mId, dId);
+        
+        if (stock == null) {
+            // 库存记录不存在，创建新记录
+            MaterialCurrentStock newStock = new MaterialCurrentStock();
+            newStock.setMaterialId(mId);
+            newStock.setDepotId(dId);
+            newStock.setCurrentNumber(increaseNumber);
+            newStock.setVersion(1);
+            materialCurrentStockMapper.insertSelective(newStock);
+            return true;
+        }
+        
+        // 使用原子操作增加库存（带乐观锁）
+        int updated = materialCurrentStockMapperEx.increaseStock(
+                mId, dId, increaseNumber, stock.getVersion());
+        
+        if (updated == 0) {
+            throw new BusinessRunTimeException(ExceptionConstants.DATA_WRITE_FAIL_CODE,
+                    "库存已被其他操作修改，请重试");
+        }
+        
+        return true;
+    }
+
+    /**
+     * 尝试获取分布式锁
+     */
+    private boolean tryAcquireLock(String key, String value) {
+        try {
+            Boolean result = (Boolean) redisTemplate.opsForValue().setIfAbsent(key, value, LOCK_EXPIRE_TIME, java.util.concurrent.TimeUnit.SECONDS);
+            return result != null && result;
+        } catch (Exception e) {
+            logger.error("获取分布式锁失败, key={}", key, e);
+            return false;
+        }
+    }
+
+    /**
+     * 释放分布式锁（防止误删其他线程的锁）
+     */
+    private void releaseLock(String key, String value) {
+        try {
+            String currentValue = (String) redisTemplate.opsForValue().get(key);
+            if (value.equals(currentValue)) {
+                redisTemplate.delete(key);
+            }
+        } catch (Exception e) {
+            logger.error("释放分布式锁失败, key={}", key, e);
+        }
+    }
+    
+    // 需要注入 redisTemplate
+    private org.springframework.data.redis.core.RedisTemplate redisTemplate;
+    
+    @Resource
+    public void setRedisTemplate(org.springframework.data.redis.core.RedisTemplate redisTemplate) {
+        this.redisTemplate = redisTemplate;
     }
 
     @Transactional(value = "transactionManager", rollbackFor = Exception.class)
